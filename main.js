@@ -1,4 +1,5 @@
 const http = require("http"),
+  https = require("https"),
   WebSocket = require("ws"),
   { queue } = require("async"),
   { app } = require("electron");
@@ -8,6 +9,9 @@ const HTTP_PORT = 5678;
 
 const GPT_40_MODEL = "gpt-4";
 const GPT_35_MODEL = "text-davinci-002-render-sha";
+
+const BRIDGE_GIST =
+  "https://gist.githubusercontent.com/aynik/9160a02686e34b114ecfa7bdcbf2f559/raw/chat-bridge.js";
 
 app.on("window-all-closed", () => {
   app.quit();
@@ -79,32 +83,67 @@ const pipeToResponse = (req, res, options = {}) =>
     }
   });
 
-const server = http.createServer(async (req, res) => {
-  if (req.method === "POST") {
-    if (req.url === "/chat") {
-      await addToQueue(() => pipeToResponse(req, res));
-    } else if (req.url === "/chat-continue") {
-      await addToQueue(() => pipeToResponse(req, res, { isContinue: true }));
-    } else if (req.url === "/chat-4") {
-      await addToQueue(() =>
-        pipeToResponse(req, res, {
-          modelName: GPT_40_MODEL,
-        })
-      );
-    } else if (req.url === "/chat-continue-4") {
-      await addToQueue(() =>
-        pipeToResponse(req, res, {
-          modelName: GPT_40_MODEL,
-          isContinue: true,
-        })
-      );
-    } else {
-      res.writeHead(404);
-    }
+const handleChatRequest = async (req, res) => {
+  if (req.url === "/chat") {
+    await addToQueue(() => pipeToResponse(req, res));
+  } else if (req.url === "/chat-continue") {
+    await addToQueue(() => pipeToResponse(req, res, { isContinue: true }));
+  } else if (req.url === "/chat-4") {
+    await addToQueue(() =>
+      pipeToResponse(req, res, {
+        modelName: GPT_40_MODEL,
+      })
+    );
+  } else if (req.url === "/chat-continue-4") {
+    await addToQueue(() =>
+      pipeToResponse(req, res, {
+        modelName: GPT_40_MODEL,
+        isContinue: true,
+      })
+    );
   } else {
-    res.writeHead(405);
+    res.writeHead(404);
   }
   res.end();
+};
+
+const handleChatBridgeRoute = (_, res) => {
+  const gistUrl = BRIDGE_GIST;
+  https
+    .get(gistUrl, (response) => {
+      if (response.statusCode === 200) {
+        let jsContent = "";
+
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          jsContent += chunk;
+        });
+
+        response.on("end", () => {
+          res.setHeader("Content-Type", "application/javascript");
+          res.writeHead(200);
+          res.end(jsContent);
+        });
+      } else {
+        res.writeHead(500);
+        res.end("Error fetching the Gist content");
+      }
+    })
+    .on("error", (_) => {
+      res.writeHead(500);
+      res.end("Error fetching the Gist content");
+    });
+};
+
+const server = http.createServer(async (req, res) => {
+  if (req.method === "POST") {
+    await handleChatRequest(req, res);
+  } else if (req.url === "/chat-bridge.js") {
+    handleChatBridgeRoute(req, res);
+  } else {
+    res.writeHead(405);
+    res.end();
+  }
 });
 
 server.listen(HTTP_PORT);
