@@ -1,145 +1,93 @@
-const http = require("http"),
-  https = require("https"),
-  WebSocket = require("ws"),
-  { queue } = require("async"),
-  { app } = require("electron");
+const http = require("http");
+const https = require("https");
+const fs = require("fs");
+const { app } = require("electron");
 
-const WS_PORT = 1234;
 const HTTP_PORT = 5678;
 
-const GPT_40_MODEL = "gpt-4";
-const GPT_35_MODEL = "text-davinci-002-render-sha";
+const CHAT_BRIDGE_GIST = "/aynik/9160a02686e34b114ecfa7bdcbf2f559/raw/chat-bridge.js";
 
-const BRIDGE_GIST =
-  "https://gist.githubusercontent.com/aynik/9160a02686e34b114ecfa7bdcbf2f559/raw/chat-bridge.js";
+const CHAT_HANDLER_GIST = "/aynik/9160a02686e34b114ecfa7bdcbf2f559/raw/chat-handler.js";
+const CHAT_HANDLER_FILE_PATH = "./chat-handler.js";
 
 app.on("window-all-closed", () => {
   app.quit();
 });
 
-const q = queue(async (task) => {
+const fetchGistCode = async (gistPath) => {
   return new Promise((resolve, reject) => {
-    task().then(resolve).catch(reject);
-  });
-}, 1);
-
-const addToQueue = (asyncFn) =>
-  new Promise((resolve, reject) => {
-    q.push(() => asyncFn().then(resolve).catch(reject));
-  });
-
-const pipeToResponse = (req, res, options = {}) =>
-  new Promise(async (resolve, reject) => {
-    try {
-      res.setHeader("Content-Type", "text/plain; charset=UTF-8");
-      res.setHeader("Transfer-Encoding", "chunked");
-
-      const reqBodyBuffers = [];
-      for await (const chunk of req) {
-        reqBodyBuffers.push(chunk);
-      }
-      const reqBody = Buffer.concat(reqBodyBuffers).toString();
-      const server = new WebSocket.Server({ port: WS_PORT });
-
-      server.on("connection", (socket) => {
-        let storedData = "",
-          previousData = "";
-
-        socket.on("message", (message) => {
-          const parsedMessage = JSON.parse(message);
-          switch (parsedMessage.type) {
-            case "connected":
-              if (!options.isContinue) {
-                socket.send(
-                  JSON.stringify({
-                    type: "load",
-                    data: options.modelName || GPT_35_MODEL,
-                  })
-                );
-                break;
-              }
-            case "loaded":
-              socket.send(
-                JSON.stringify({
-                  type: "text",
-                  data: reqBody,
-                })
-              );
-              break;
-            default:
-              storedData = parsedMessage.data.replace(/\u200B/g, "");
-              res.write(storedData.slice(previousData.length));
-              previousData = storedData;
-              if ("end" === parsedMessage.type) {
-                socket.terminate();
-                server.close();
-                resolve();
-              }
+    const value = (Math.random() + 1).toString(36).substring(7);
+    https
+      .get({
+        host: "gist.githubusercontent.com",
+        path: gistPath + "?v=" + value,
+        options: {
+          headers: {
+            'Cache-Control': 'private, no-cache, no-store, must-revalidate, max-age=0',
+            'Pragma': 'no-cache',
           }
-        });
-      });
-    } catch (error) {
-      reject(error);
-    }
-  });
+        }
+      }, (response) => {
+        if (response.statusCode === 200) {
+          let jsContent = "";
 
-const handleChatRequest = async (req, res) => {
-  if (req.url === "/chat") {
-    await addToQueue(() => pipeToResponse(req, res));
-  } else if (req.url === "/chat-continue") {
-    await addToQueue(() => pipeToResponse(req, res, { isContinue: true }));
-  } else if (req.url === "/chat-4") {
-    await addToQueue(() =>
-      pipeToResponse(req, res, {
-        modelName: GPT_40_MODEL,
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => {
+            jsContent += chunk;
+          });
+
+          response.on("end", () => {
+            resolve(jsContent);
+          });
+        } else {
+          reject(new Error("Error fetching the Gist content"));
+        }
       })
-    );
-  } else if (req.url === "/chat-continue-4") {
-    await addToQueue(() =>
-      pipeToResponse(req, res, {
-        modelName: GPT_40_MODEL,
-        isContinue: true,
-      })
-    );
-  } else {
-    res.writeHead(404);
-  }
-  res.end();
+      .on("error", (error) => {
+        reject(error);
+      });
+  });
 };
 
-const handleChatBridgeRoute = (_, res) => {
-  const gistUrl = BRIDGE_GIST;
-  https
-    .get(gistUrl, (response) => {
-      if (response.statusCode === 200) {
-        let jsContent = "";
 
-        response.setEncoding("utf8");
-        response.on("data", (chunk) => {
-          jsContent += chunk;
-        });
+const downloadGistToFile = async (gistUrl, filePath) => {
+  try {
+    const gistCode = await fetchGistCode(gistUrl);
+    fs.writeFileSync(filePath, gistCode);
+  } catch (error) {
+    console.error(`Error downloading the gist to a file: ${error.message}`);
+  }
+};
 
-        response.on("end", () => {
-          res.setHeader("Content-Type", "application/javascript");
-          res.writeHead(200);
-          res.end(jsContent);
-        });
-      } else {
-        res.writeHead(500);
-        res.end("Error fetching the Gist content");
-      }
-    })
-    .on("error", (_) => {
-      res.writeHead(500);
-      res.end("Error fetching the Gist content");
-    });
+const requireDynamic = (path) => {
+  delete require.cache[require.resolve(path)];
+  return require(path);
+};
+
+const serveBridgeGist = async (_, res) => {
+  try {
+    const gistCode = await fetchGistCode(CHAT_BRIDGE_GIST);
+    res.setHeader("Content-Type", "application/javascript");
+    res.writeHead(200);
+    res.end(gistCode);
+  } catch (error) {
+    res.writeHead(500);
+    res.end(`Error: ${error.message}`);
+  }
 };
 
 const server = http.createServer(async (req, res) => {
-  if (req.method === "POST") {
-    await handleChatRequest(req, res);
-  } else if (req.url === "/chat-bridge.js") {
-    handleChatBridgeRoute(req, res);
+  if (req.url === "/chat-bridge.js") {
+    await serveBridgeGist(req, res);
+  } else if (req.method === "POST") {
+    try {
+      await downloadGistToFile(CHAT_HANDLER_GIST, CHAT_HANDLER_FILE_PATH);
+      const chatHandler = requireDynamic(CHAT_HANDLER_FILE_PATH);
+      await chatHandler.handleChatRequest(req, res);
+    } catch (error) {
+      res.writeHead(500);
+      res.end(`Error: ${error.message}`);
+    }
   } else {
     res.writeHead(405);
     res.end();
