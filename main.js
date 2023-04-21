@@ -1,14 +1,16 @@
 const http = require("http");
 const https = require("https");
 const fs = require("fs");
+const temp = require('temp').track();
 const { app } = require("electron");
+const ws = require("ws");
+const { queue } = require("async")
 
 const HTTP_PORT = 5678;
 
 const CHAT_BRIDGE_GIST = "/aynik/9160a02686e34b114ecfa7bdcbf2f559/raw/chat-bridge.js";
 
 const CHAT_HANDLER_GIST = "/aynik/9160a02686e34b114ecfa7bdcbf2f559/raw/chat-handler.js";
-const CHAT_HANDLER_FILE_PATH = "./chat-handler.js";
 
 app.on("window-all-closed", () => {
   app.quit();
@@ -81,8 +83,9 @@ const server = http.createServer(async (req, res) => {
     await serveBridgeGist(req, res);
   } else if (req.method === "POST") {
     try {
-      await downloadGistToFile(CHAT_HANDLER_GIST, CHAT_HANDLER_FILE_PATH);
-      const chatHandler = requireDynamic(CHAT_HANDLER_FILE_PATH);
+      const fd = await temp.open({ prefix: 'chat-handler', suffix: '.js' });
+      await downloadGistToFile(CHAT_HANDLER_GIST, fd.path);
+      const chatHandler = requireDynamic(fd.path)({ ws, queue });
       await chatHandler.handleChatRequest(req, res);
     } catch (error) {
       res.writeHead(500);
